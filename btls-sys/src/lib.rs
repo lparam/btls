@@ -39,6 +39,27 @@ pub type BN_ULONG = u64;
 #[cfg(target_pointer_width = "32")]
 pub type BN_ULONG = u32;
 
+extern "C" {
+    pub fn SSL_set_fixed_ecdh_private_key(
+        ssl: *mut SSL,
+        key: *const u8,
+        key_len: usize,
+    );
+
+    pub fn EVP_PKEY_new_raw_private_key(
+        type_: c_int,
+        engine: *mut ENGINE,
+        key: *const u8,
+        len: usize,
+    ) -> *mut EVP_PKEY;
+
+    pub fn EVP_PKEY_get_raw_public_key(
+        pkey: *const EVP_PKEY,
+        out: *mut u8,
+        len: *mut usize,
+    ) -> c_int;
+}
+
 #[must_use]
 pub const fn ERR_PACK(l: c_int, f: c_int, r: c_int) -> c_ulong {
     ((l as c_ulong & 0x0FF) << 24) | ((f as c_ulong & 0xFFF) << 12) | (r as c_ulong & 0xFFF)

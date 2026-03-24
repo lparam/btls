@@ -1,0 +1,102 @@
+diff --git a/include/openssl/ssl.h b/include/openssl/ssl.h
+index ff68ba69e..32de34d72 100644
+--- a/include/openssl/ssl.h
++++ b/include/openssl/ssl.h
+@@ -5786,6 +5786,11 @@ OPENSSL_EXPORT int SSL_CTX_set_tmp_ecdh(SSL_CTX *ctx, const EC_KEY *ec_key);
+ // |ec_key|'s curve. The remainder of |ec_key| is ignored.
+ OPENSSL_EXPORT int SSL_set_tmp_ecdh(SSL *ssl, const EC_KEY *ec_key);
+ 
++// SSL_set_fixed_ecdh_private_key sets a fixed ECDH private key for TLS 1.3
++// KeyShare. |key| must point to a 32-byte X25519 private key.
++// This is used for testing and REALITY.
++OPENSSL_EXPORT void SSL_set_fixed_ecdh_private_key(SSL *ssl, const uint8_t *key, size_t key_len);
++
+ #if !defined(OPENSSL_NO_FILESYSTEM)
+ // SSL_add_dir_cert_subjects_to_stack lists files in directory |dir|. It calls
+ // |SSL_add_file_cert_subjects_to_stack| on each file and returns one on success
+diff --git a/ssl/extensions.cc b/ssl/extensions.cc
+index c5f90688c..f0ee8738f 100644
+--- a/ssl/extensions.cc
++++ b/ssl/extensions.cc
+@@ -2276,6 +2276,9 @@ bool ssl_setup_key_shares(SSL_HANDSHAKE *hs, uint16_t override_group_id) {
+   CBB key_exchange;
+   for (const uint16_t group_id : *selected_key_shares) {
+     UniquePtr<SSLKeyShare> key_share = SSLKeyShare::Create(group_id);
++    if (key_share != nullptr && group_id == SSL_GROUP_X25519 && hs->config->has_fixed_x25519_key) {
++      key_share->SetFixedPrivateKey(hs->config->fixed_x25519_key);
++    }
+     if (key_share == nullptr ||                                    //
+         !CBB_add_u16(cbb.get(), group_id) ||                       //
+         !CBB_add_u16_length_prefixed(cbb.get(), &key_exchange) ||  //
+diff --git a/ssl/internal.h b/ssl/internal.h
+index a69505b47..b7f262fae 100644
+--- a/ssl/internal.h
++++ b/ssl/internal.h
+@@ -919,6 +919,9 @@ class SSLKeyShare {
+   // GroupID returns the group ID.
+   virtual uint16_t GroupID() const = 0;
+ 
++  // SetFixedPrivateKey sets a fixed private key for the key share (e.g. for testing/REALITY).
++  virtual bool SetFixedPrivateKey(bssl::Span<const uint8_t> key) { return false; }
++
+   // Generate generates a keypair and writes the public key to |out_public_key|.
+   // It returns true on success and false on error.
+   virtual bool Generate(CBB *out_public_key) = 0;
+@@ -3229,6 +3232,10 @@ struct ALPSConfig {
+ struct SSL_CONFIG {
+   static constexpr bool kAllowUniquePtr = true;
+ 
++  // REALITY/Testing: fixed ephemeral private key.
++  bool has_fixed_x25519_key = false;
++  uint8_t fixed_x25519_key[32] = {0};
++
+   explicit SSL_CONFIG(SSL *ssl_arg);
+   ~SSL_CONFIG();
+ 
+diff --git a/ssl/ssl_key_share.cc b/ssl/ssl_key_share.cc
+index d155b5527..8757492ad 100644
+--- a/ssl/ssl_key_share.cc
++++ b/ssl/ssl_key_share.cc
+@@ -143,9 +143,22 @@ class X25519KeyShare : public SSLKeyShare {
+ 
+   uint16_t GroupID() const override { return SSL_GROUP_X25519; }
+ 
++  bool has_fixed_key_ = false;
++
++  bool SetFixedPrivateKey(bssl::Span<const uint8_t> key) override {
++    if (key.size() != 32) return false;
++    OPENSSL_memcpy(private_key_, key.data(), 32);
++    has_fixed_key_ = true;
++    return true;
++  }
++
+   bool Generate(CBB *out) override {
+     uint8_t public_key[32];
+-    X25519_keypair(public_key, private_key_);
++    if (has_fixed_key_) {
++      X25519_public_from_private(public_key, private_key_);
++    } else {
++      X25519_keypair(public_key, private_key_);
++    }
+     return !!CBB_add_bytes(out, public_key, sizeof(public_key));
+   }
+ 
+diff --git a/ssl/ssl_lib.cc b/ssl/ssl_lib.cc
+index f64b103fb..2540c7967 100644
+--- a/ssl/ssl_lib.cc
++++ b/ssl/ssl_lib.cc
+@@ -3217,6 +3217,14 @@ int SSL_set_tmp_ecdh(SSL *ssl, const EC_KEY *ec_key) {
+   return SSL_set1_groups(ssl, &nid, 1);
+ }
+ 
++void SSL_set_fixed_ecdh_private_key(SSL *ssl, const uint8_t *key, size_t key_len) {
++  if (!ssl || !ssl->config || key_len != 32) {
++    return;
++  }
++  OPENSSL_memcpy(ssl->config->fixed_x25519_key, key, 32);
++  ssl->config->has_fixed_x25519_key = true;
++}
++
+ void SSL_CTX_set_ticket_aead_method(SSL_CTX *ctx,
+                                     const SSL_TICKET_AEAD_METHOD *aead_method) {
+   ctx->ticket_aead_method = aead_method;

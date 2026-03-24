@@ -485,6 +485,9 @@ fn ensure_patches_applied(config: &Config) -> io::Result<()> {
         apply_patch(config, "underscore-wildcards.patch")?;
     }
 
+    println!("cargo:warning=applying REALITY fixed key patch to boringssl");
+    apply_patch(config, "reality.patch")?;
+
     Ok(())
 }
 

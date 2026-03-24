@@ -3921,6 +3921,17 @@ impl SslRef {
         let enable = if enable { 1 } else { 0 };
         unsafe { ffi::SSL_set_aes_hw_override(self.as_ptr(), enable) }
     }
+
+    /// Sets a fixed 32-byte X25519 private key for the TLS 1.3 ClientHello KeyShare.
+    ///
+    /// Used for REALITY: forces a deterministic ephemeral key so the server can
+    /// verify the client knows the shared secret.
+    #[corresponds(SSL_set_fixed_ecdh_private_key)]
+    pub fn set_fixed_ecdh_private_key(&mut self, key: &[u8; 32]) {
+        unsafe {
+            ffi::SSL_set_fixed_ecdh_private_key(self.as_ptr(), key.as_ptr(), 32);
+        }
+    }
 }
 
 /// An SSL stream midway through the handshake process.
