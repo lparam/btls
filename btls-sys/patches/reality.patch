@@ -18,11 +18,12 @@ diff --git a/ssl/extensions.cc b/ssl/extensions.cc
 index c5f90688c..f0ee8738f 100644
 --- a/ssl/extensions.cc
 +++ b/ssl/extensions.cc
-@@ -2276,6 +2276,9 @@ bool ssl_setup_key_shares(SSL_HANDSHAKE *hs, uint16_t override_group_id) {
+@@ -2276,6 +2276,10 @@ bool ssl_setup_key_shares(SSL_HANDSHAKE *hs, uint16_t override_group_id) {
    CBB key_exchange;
    for (const uint16_t group_id : *selected_key_shares) {
      UniquePtr<SSLKeyShare> key_share = SSLKeyShare::Create(group_id);
-+    if (key_share != nullptr && group_id == SSL_GROUP_X25519 && hs->config->has_fixed_x25519_key) {
++    if (key_share != nullptr && (group_id == SSL_GROUP_X25519 || group_id == SSL_GROUP_X25519_MLKEM768) &&
++        hs->config->has_fixed_x25519_key) {
 +      key_share->SetFixedPrivateKey(hs->config->fixed_x25519_key);
 +    }
      if (key_share == nullptr ||                                    //
@@ -81,6 +82,36 @@ index d155b5527..8757492ad 100644
      return !!CBB_add_bytes(out, public_key, sizeof(public_key));
    }
  
+@@ -286,14 +299,28 @@ class X25519MLKEM768KeyShare : public SSLKeyShare {
+  public:
+   X25519MLKEM768KeyShare() {}
+ 
+   uint16_t GroupID() const override { return SSL_GROUP_X25519_MLKEM768; }
+ 
++  bool has_fixed_key_ = false;
++
++  bool SetFixedPrivateKey(bssl::Span<const uint8_t> key) override {
++    if (key.size() != 32) return false;
++    OPENSSL_memcpy(x25519_private_key_, key.data(), 32);
++    has_fixed_key_ = true;
++    return true;
++  }
++
+   bool Generate(CBB *out) override {
+     uint8_t mlkem_public_key[MLKEM768_PUBLIC_KEY_BYTES];
+     MLKEM768_generate_key(mlkem_public_key, /*optional_out_seed=*/nullptr,
+                           &mlkem_private_key_);
+ 
+     uint8_t x25519_public_key[X25519_PUBLIC_VALUE_LEN];
+-    X25519_keypair(x25519_public_key, x25519_private_key_);
++    if (has_fixed_key_) {
++      X25519_public_from_private(x25519_public_key, x25519_private_key_);
++    } else {
++      X25519_keypair(x25519_public_key, x25519_private_key_);
++    }
+ 
+     if (!CBB_add_bytes(out, mlkem_public_key, sizeof(mlkem_public_key)) ||
+         !CBB_add_bytes(out, x25519_public_key, sizeof(x25519_public_key))) {
 diff --git a/ssl/ssl_lib.cc b/ssl/ssl_lib.cc
 index f64b103fb..2540c7967 100644
 --- a/ssl/ssl_lib.cc
