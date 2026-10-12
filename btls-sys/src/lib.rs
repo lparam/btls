@@ -22,7 +22,8 @@ use std::os::raw::{c_char, c_int, c_uint, c_ulong};
     clippy::useless_transmute,
     dead_code,
     unknown_lints,
-    unnecessary_transmutes
+    unnecessary_transmutes,
+    suspicious_runtime_symbol_definitions
 )]
 mod generated {
     include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
@@ -45,6 +46,48 @@ pub use generated::*;
 pub type BN_ULONG = u64;
 #[cfg(target_pointer_width = "32")]
 pub type BN_ULONG = u32;
+
+extern "C" {
+    pub fn SSL_set_fixed_ecdh_private_key(
+        ssl: *mut SSL,
+        key: *const u8,
+        key_len: usize,
+    );
+
+    pub fn SSL_set_client_hello_filter(
+        ssl: *mut SSL,
+        filter: Option<unsafe extern "C" fn(ssl: *mut SSL, msg: *mut u8, msg_len: usize, arg: *mut c_void) -> c_int>,
+        arg: *mut c_void,
+    );
+
+    pub fn SSL_get_unconsumed_read_buffer(
+        ssl: *const SSL,
+        out_ptr: *mut *const u8,
+    ) -> usize;
+
+    pub fn EVP_PKEY_new_raw_private_key(
+        type_: c_int,
+        engine: *mut ENGINE,
+        key: *const u8,
+        len: usize,
+    ) -> *mut EVP_PKEY;
+
+    pub fn EVP_PKEY_get_raw_public_key(
+        pkey: *const EVP_PKEY,
+        out: *mut u8,
+        len: *mut usize,
+    ) -> c_int;
+
+    pub fn X25519(
+        out_shared_key: *mut u8,
+        private_key: *const u8,
+        peer_public_value: *const u8,
+    ) -> c_int;
+
+    pub fn X25519_public_from_private(out_public_value: *mut u8, private_key: *const u8);
+
+    pub fn X25519_keypair(out_public_value: *mut u8, out_private_key: *mut u8);
+}
 
 #[must_use]
 pub const fn ERR_PACK(l: c_int, f: c_int, r: c_int) -> c_ulong {

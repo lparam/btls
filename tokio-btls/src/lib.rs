@@ -247,6 +247,21 @@ impl<S> SslStream<S> {
         unsafe { Pin::new_unchecked(&mut self.get_unchecked_mut().0.get_mut().transport.stream) }
     }
 
+    /// Consumes the `SslStream`, returning the underlying stream and any unconsumed raw bytes
+    /// remaining in both BoringSSL's internal read buffer and tokio-btls's transport read buffer.
+    ///
+    /// This is essential for zero-copy direct splice protocols (like XTLS-Vision), where the
+    /// stream transitions from TLS to plaintext transport while raw bytes may have already
+    /// been buffered.
+    pub fn into_parts(self) -> (S, Vec<u8>) {
+        let mut leftover = self.ssl().unconsumed_read_buffer().to_vec();
+        let wrapper = self.0.into_inner();
+        if wrapper.read_buf.pos < wrapper.read_buf.bytes.len() {
+            leftover.extend_from_slice(&wrapper.read_buf.bytes[wrapper.read_buf.pos..]);
+        }
+        (wrapper.transport.stream, leftover)
+    }
+
     /// Runs `f` with `ctx` installed as the context of the transport I/O BoringSSL performs in it.
     fn with_context<F, R>(self: Pin<&mut Self>, ctx: &mut Context<'_>, f: F) -> R
     where

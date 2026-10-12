@@ -1,0 +1,193 @@
+diff --git a/include/openssl/ssl.h b/include/openssl/ssl.h
+index 07fda3075..7db1d59e9 100644
+--- a/include/openssl/ssl.h
++++ b/include/openssl/ssl.h
+@@ -6260,6 +6260,16 @@ OPENSSL_EXPORT int SSL_CTX_set_tmp_ecdh(SSL_CTX *ctx, const EC_KEY *ec_key);
+ // `ec_key`'s curve. The remainder of `ec_key` is ignored.
+ OPENSSL_EXPORT int SSL_set_tmp_ecdh(SSL *ssl, const EC_KEY *ec_key);
+ 
++// Support for setting fixed ephemeral keys
++OPENSSL_EXPORT void SSL_set_fixed_ecdh_private_key(SSL *ssl, const uint8_t *key, size_t key_len);
++
++// ClientHello filter callback before transcript hashing
++typedef int (*ssl_client_hello_filter_func)(SSL *ssl, uint8_t *msg, size_t msg_len, void *arg);
++OPENSSL_EXPORT void SSL_set_client_hello_filter(SSL *ssl, ssl_client_hello_filter_func filter, void *arg);
++
++// Export unconsumed raw bytes from internal read buffer (for direct splice / TLS unwrap)
++OPENSSL_EXPORT size_t SSL_get_unconsumed_read_buffer(const SSL *ssl, const uint8_t **out_ptr);
++
+ #if !defined(OPENSSL_NO_FILESYSTEM)
+ // SSL_add_dir_cert_subjects_to_stack lists files in directory `dir`. It calls
+ // `SSL_add_file_cert_subjects_to_stack` on each file and returns one on success
+diff --git a/ssl/extensions.cc b/ssl/extensions.cc
+index f8627416b..9f68943aa 100644
+--- a/ssl/extensions.cc
++++ b/ssl/extensions.cc
+@@ -2516,6 +2516,9 @@ bool ssl_setup_key_shares(SSL_HANDSHAKE *hs, uint16_t override_group_id) {
+   CBB key_exchange;
+   for (const uint16_t group_id : *selected_key_shares) {
+     UniquePtr<SSLKeyShare> key_share = SSLKeyShare::Create(group_id);
++    if (key_share != nullptr && (group_id == SSL_GROUP_X25519 || group_id == SSL_GROUP_X25519_KYBER768_DRAFT00 || group_id == SSL_GROUP_X25519_MLKEM768) && hs->config->has_fixed_x25519_key) {
++      key_share->SetFixedPrivateKey(hs->config->fixed_x25519_key);
++    }
+     if (key_share == nullptr ||                                    //
+         !CBB_add_u16(cbb.get(), group_id) ||                       //
+         !CBB_add_u16_length_prefixed(cbb.get(), &key_exchange) ||  //
+diff --git a/ssl/handshake_client.cc b/ssl/handshake_client.cc
+index f52bff3c0..1cd7f6e6f 100644
+--- a/ssl/handshake_client.cc
++++ b/ssl/handshake_client.cc
+@@ -251,6 +251,15 @@ bool ssl_add_client_hello(SSL_HANDSHAKE *hs) {
+     return false;
+   }
+ 
++  if (hs->config->client_hello_filter != nullptr) {
++    if (!hs->config->client_hello_filter(ssl, msg.data(), msg.size(), hs->config->client_hello_filter_arg)) {
++      return false;
++    }
++    if (msg.size() >= 71 && msg.data()[0] == SSL3_MT_CLIENT_HELLO && msg.data()[38] == 32) {
++      hs->session_id.CopyFrom(bssl::Span<const uint8_t>(msg.data() + 39, 32));
++    }
++  }
++
+   return ssl->method->add_message(ssl, std::move(msg));
+ }
+ 
+diff --git a/ssl/internal.h b/ssl/internal.h
+index 72da692e4..14aca2b66 100644
+--- a/ssl/internal.h
++++ b/ssl/internal.h
+@@ -898,6 +898,7 @@ class SSLKeyShare {
+ 
+   // GroupID returns the group ID.
+   virtual uint16_t GroupID() const = 0;
++  virtual bool SetFixedPrivateKey(bssl::Span<const uint8_t> key) { return false; }
+ 
+   // Generate generates a keypair and writes the public key to `out_public_key`.
+   // It returns true on success and false on error.
+@@ -3391,6 +3392,11 @@ struct ALPSConfig {
+ // See SSL_shed_handshake_config() for more about the conditions under which
+ // configuration can be shed.
+ struct SSL_CONFIG {
++  // Fixed ephemeral key support
++  bool has_fixed_x25519_key = false;
++  uint8_t fixed_x25519_key[32] = {0};
++  ssl_client_hello_filter_func client_hello_filter = nullptr;
++  void *client_hello_filter_arg = nullptr;
+   static constexpr bool kAllowUniquePtr = true;
+ 
+   explicit SSL_CONFIG(SSLImpl *ssl_arg);
+diff --git a/ssl/ssl_key_share.cc b/ssl/ssl_key_share.cc
+index 8ce8e3cbd..0ac0f2e1e 100644
+--- a/ssl/ssl_key_share.cc
++++ b/ssl/ssl_key_share.cc
+@@ -303,6 +303,16 @@ class FFDHEKeyShare : public SSLKeyShare {
+ };
+ 
+ class X25519KeyShare : public SSLKeyShare {
++ public:
++  bool has_fixed_key_ = false;
++
++  bool SetFixedPrivateKey(bssl::Span<const uint8_t> key) override {
++    if (key.size() != 32) return false;
++    OPENSSL_memcpy(private_key_, key.data(), 32);
++    has_fixed_key_ = true;
++    return true;
++  }
++
+  public:
+   X25519KeyShare() {}
+ 
+@@ -310,7 +320,7 @@ class X25519KeyShare : public SSLKeyShare {
+ 
+   bool Generate(CBB *out) override {
+     uint8_t public_key[32];
+-    X25519_keypair(public_key, private_key_);
++    if (has_fixed_key_) { X25519_public_from_private(public_key, private_key_); } else { X25519_keypair(public_key, private_key_); }
+     return !!CBB_add_bytes(out, public_key, sizeof(public_key));
+   }
+ 
+@@ -463,6 +473,16 @@ class P256Kyber768Draft00KeyShare : public SSLKeyShare {
+ 
+ // draft-tls-westerbaan-xyber768d00-03
+ class X25519Kyber768KeyShare : public SSLKeyShare {
++ public:
++  bool has_fixed_key_ = false;
++
++  bool SetFixedPrivateKey(bssl::Span<const uint8_t> key) override {
++    if (key.size() != 32) return false;
++    OPENSSL_memcpy(x25519_private_key_, key.data(), 32);
++    has_fixed_key_ = true;
++    return true;
++  }
++
+  public:
+   X25519Kyber768KeyShare() {}
+ 
+@@ -472,7 +492,7 @@ class X25519Kyber768KeyShare : public SSLKeyShare {
+ 
+   bool Generate(CBB *out) override {
+     uint8_t x25519_public_key[32];
+-    X25519_keypair(x25519_public_key, x25519_private_key_);
++    if (has_fixed_key_) { X25519_public_from_private(x25519_public_key, x25519_private_key_); } else { X25519_keypair(x25519_public_key, x25519_private_key_); }
+ 
+     uint8_t kyber_public_key[KYBER_PUBLIC_KEY_BYTES];
+     KYBER_generate_key(kyber_public_key, &kyber_private_key_);
+@@ -493,7 +513,7 @@ class X25519Kyber768KeyShare : public SSLKeyShare {
+     }
+ 
+     uint8_t x25519_public_key[32];
+-    X25519_keypair(x25519_public_key, x25519_private_key_);
++    if (has_fixed_key_) { X25519_public_from_private(x25519_public_key, x25519_private_key_); } else { X25519_keypair(x25519_public_key, x25519_private_key_); }
+     KYBER_public_key peer_kyber_pub;
+     CBS peer_key_cbs, peer_x25519_cbs, peer_kyber_cbs;
+     CBS_init(&peer_key_cbs, peer_key.data(), peer_key.size());
+@@ -552,6 +572,16 @@ class X25519Kyber768KeyShare : public SSLKeyShare {
+ 
+ // draft-ietf-tls-ecdhe-mlkem-00
+ class X25519MLKEM768KeyShare : public SSLKeyShare {
++ public:
++  bool has_fixed_key_ = false;
++
++  bool SetFixedPrivateKey(bssl::Span<const uint8_t> key) override {
++    if (key.size() != 32) return false;
++    OPENSSL_memcpy(x25519_private_key_, key.data(), 32);
++    has_fixed_key_ = true;
++    return true;
++  }
++
+  public:
+   X25519MLKEM768KeyShare() {}
+ 
+@@ -563,7 +593,7 @@ class X25519MLKEM768KeyShare : public SSLKeyShare {
+                           &mlkem_private_key_);
+ 
+     uint8_t x25519_public_key[X25519_PUBLIC_VALUE_LEN];
+-    X25519_keypair(x25519_public_key, x25519_private_key_);
++    if (has_fixed_key_) { X25519_public_from_private(x25519_public_key, x25519_private_key_); } else { X25519_keypair(x25519_public_key, x25519_private_key_); }
+ 
+     if (!CBB_add_bytes(out, mlkem_public_key, sizeof(mlkem_public_key)) ||
+         !CBB_add_bytes(out, x25519_public_key, sizeof(x25519_public_key))) {
+@@ -583,7 +613,7 @@ class X25519MLKEM768KeyShare : public SSLKeyShare {
+ 
+     MLKEM768_public_key peer_mlkem_pub;
+     uint8_t x25519_public_key[X25519_PUBLIC_VALUE_LEN];
+-    X25519_keypair(x25519_public_key, x25519_private_key_);
++    if (has_fixed_key_) { X25519_public_from_private(x25519_public_key, x25519_private_key_); } else { X25519_keypair(x25519_public_key, x25519_private_key_); }
+     CBS peer_key_cbs, peer_mlkem_cbs, peer_x25519_cbs;
+     CBS_init(&peer_key_cbs, peer_key.data(), peer_key.size());
+     if (!CBS_get_bytes(&peer_key_cbs, &peer_mlkem_cbs,
+diff --git a/ssl/ssl_lib.cc b/ssl/ssl_lib.cc
+index b8abfd264..03b04c925 100644
+--- a/ssl/ssl_lib.cc
++++ b/ssl/ssl_lib.cc
+@@ -3993,6 +3993,9 @@ int SSL_set1_requested_trust_anchors(SSL *ssl, const uint8_t *ids,
+ }
+ 
+ int SSL_CTX_get_security_level(const SSL_CTX *ctx) { return 0; }
++void SSL_set_fixed_ecdh_private_key(SSL *ssl, const uint8_t *key, size_t key_len) { if (!ssl || key_len != 32) return; SSLImpl *impl = FromOpaque(ssl); if (!impl || !impl->config) return; OPENSSL_memcpy(impl->config->fixed_x25519_key, key, 32); impl->config->has_fixed_x25519_key = true; }
++void SSL_set_client_hello_filter(SSL *ssl, ssl_client_hello_filter_func filter, void *arg) { if (!ssl) return; SSLImpl *impl = FromOpaque(ssl); if (!impl || !impl->config) return; impl->config->client_hello_filter = filter; impl->config->client_hello_filter_arg = arg; }
++size_t SSL_get_unconsumed_read_buffer(const SSL *ssl, const uint8_t **out_ptr) { if (!ssl) { if (out_ptr) *out_ptr = nullptr; return 0; } const SSLImpl *impl = FromOpaque(ssl); if (!impl || !impl->s3) { if (out_ptr) *out_ptr = nullptr; return 0; } if (out_ptr) *out_ptr = impl->s3->read_buffer.data(); return impl->s3->read_buffer.size(); }
+ 
+ static bool is_valid_cert_types_list(Span<const uint8_t> list) {
+   if (list.empty() || list.size() > kNumCertTypes) {

@@ -4417,6 +4417,44 @@ impl SslRef {
         unsafe { ffi::SSL_set_aes_hw_override(self.as_ptr(), enable) }
     }
 
+    /// Sets a fixed 32-byte X25519 private key for the TLS 1.3 ClientHello KeyShare.
+    ///
+    /// Used for deterministic handshakes or specific protocols: forces a deterministic ephemeral key so the server can
+    /// verify the client knows the shared secret.
+    #[corresponds(SSL_set_fixed_ecdh_private_key)]
+    pub fn set_fixed_ecdh_private_key(&mut self, key: &[u8; 32]) {
+        unsafe {
+            ffi::SSL_set_fixed_ecdh_private_key(self.as_ptr(), key.as_ptr(), 32);
+        }
+    }
+
+    /// Sets an in-flight filter for the ClientHello message before it is added to the transcript hash.
+    #[corresponds(SSL_set_client_hello_filter)]
+    pub unsafe fn set_client_hello_filter(
+        &mut self,
+        filter: Option<unsafe extern "C" fn(*mut ffi::SSL, *mut u8, usize, *mut std::ffi::c_void) -> std::ffi::c_int>,
+        arg: *mut std::ffi::c_void,
+    ) {
+        ffi::SSL_set_client_hello_filter(self.as_ptr(), filter, arg);
+    }
+
+    /// Returns a slice of raw bytes currently remaining in the internal SSL read buffer.
+    ///
+    /// This is used when transitioning a TLS stream to raw transport (e.g. XTLS-Vision direct mode),
+    /// where unconsumed application or protocol bytes read into the underlying BIO need to be drained.
+    #[corresponds(SSL_get_unconsumed_read_buffer)]
+    pub fn unconsumed_read_buffer(&self) -> &[u8] {
+        unsafe {
+            let mut ptr: *const u8 = std::ptr::null();
+            let len = ffi::SSL_get_unconsumed_read_buffer(self.as_ptr(), &mut ptr);
+            if len > 0 && !ptr.is_null() {
+                std::slice::from_raw_parts(ptr, len)
+            } else {
+                &[]
+            }
+        }
+    }
+
     /// Requests `num_bytes` of padding from the server in its EncryptedExtensions.
     ///
     /// Servers answer only over TLS 1.3, and not for more than 16 KiB. The extension is
