@@ -4440,7 +4440,7 @@ impl SslRef {
 
     /// Returns a slice of raw bytes currently remaining in the internal SSL read buffer.
     ///
-    /// This is used when transitioning a TLS stream to raw transport (e.g. XTLS-Vision direct mode),
+    /// This is used when transitioning a TLS stream to raw transport (e.g. protocol handovers or proxy unwrapping),
     /// where unconsumed application or protocol bytes read into the underlying BIO need to be drained.
     #[corresponds(SSL_get_unconsumed_read_buffer)]
     pub fn unconsumed_read_buffer(&self) -> &[u8] {
